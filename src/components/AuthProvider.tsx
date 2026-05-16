@@ -67,13 +67,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const data = await res.json();
 
       if (!res.ok) {
-        return { success: false, error: data.error || "Login failed" };
+        // Show detail if available (for debugging)
+        const errMsg = data.detail
+          ? `${data.error}: ${data.detail}`
+          : data.error || "Login failed";
+        return { success: false, error: errMsg };
       }
 
       await refreshUser();
       return { success: true };
-    } catch {
-      return { success: false, error: "Something went wrong" };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Network error";
+      return { success: false, error: `Connection failed: ${msg}` };
     }
   };
 
@@ -87,13 +92,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const data = await res.json();
 
       if (!res.ok) {
-        return { success: false, error: data.error || "Registration failed" };
+        const errMsg = data.detail
+          ? `${data.error}: ${data.detail}`
+          : data.error || "Registration failed";
+        return { success: false, error: errMsg };
       }
 
       await refreshUser();
       return { success: true };
-    } catch {
-      return { success: false, error: "Something went wrong" };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Network error";
+      return { success: false, error: `Connection failed: ${msg}` };
     }
   };
 
