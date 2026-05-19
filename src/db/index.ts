@@ -10,20 +10,18 @@ const globalForDb = globalThis as typeof globalThis & {
 function createPool(): Pool {
   const url = process.env.DATABASE_URL;
   if (!url) {
-    throw new Error(
-      "DATABASE_URL is not set. Add it to .env (local) or Vercel Environment Variables."
-    );
+    throw new Error("DATABASE_URL is not set.");
   }
 
   const isLocal = url.includes("localhost") || url.includes("127.0.0.1");
-  const isVercel = process.env.VERCEL === "1";
 
   return new Pool({
     connectionString: url,
-    max: isVercel ? 1 : 10,
-    idleTimeoutMillis: isVercel ? 10000 : 30000,
-    connectionTimeoutMillis: 10000,
-    ssl: isLocal ? undefined : { rejectUnauthorized: false },
+    max: 3,
+    idleTimeoutMillis: 20000,
+    connectionTimeoutMillis: 15000,
+    // Supabase REQUIRES SSL
+    ssl: isLocal ? false : { rejectUnauthorized: false },
   });
 }
 
@@ -45,11 +43,6 @@ function getDb(): NodePgDatabase<typeof schema> {
   return instance;
 }
 
-// ── Lazy proxy ──────────────────────────────────────────────
-// The DB is NOT connected at import time. This is critical:
-// During `next build` on Vercel, DATABASE_URL may not exist.
-// The proxy defers connection until a real request calls
-// db.select(), db.insert(), etc. at runtime.
 export const db: NodePgDatabase<typeof schema> = new Proxy(
   {} as NodePgDatabase<typeof schema>,
   {

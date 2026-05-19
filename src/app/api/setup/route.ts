@@ -1,42 +1,90 @@
 import { NextResponse } from "next/server";
-import { db } from "@/db";
-import { sql } from "drizzle-orm";
+import { Pool } from "pg";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
   const result: Record<string, unknown> = {
     timestamp: new Date().toISOString(),
-    env: {
-      DATABASE_URL: process.env.DATABASE_URL
-        ? `✅ Set (${process.env.DATABASE_URL.substring(0, 30)}...)`
-        : "❌ MISSING — add DATABASE_URL to Vercel Environment Variables",
-      JWT_SECRET: process.env.JWT_SECRET
-        ? "✅ Set"
-        : "⚠️ Missing — using fallback (not secure for production)",
-      NODE_ENV: process.env.NODE_ENV,
-      VERCEL: process.env.VERCEL || "not set",
-    },
   };
 
-  // Step 1: Test DB connection
-  try {
-    await db.execute(sql`SELECT 1 as ok`);
-    result.database = "✅ Connected";
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    result.database = `❌ Connection failed: ${msg}`;
-    result.fix = "Check DATABASE_URL. Make sure password is correct and Supabase project is active.";
+  const url = process.env.DATABASE_URL;
+
+  if (!url) {
+    result.error = "DATABASE_URL is not set";
     return NextResponse.json(result, { status: 500 });
   }
 
-  // Step 2: Check tables
+  // Parse the URL to show (without password)
   try {
-    const tables = await db.execute(sql`
+    const parsed = new URL(url);
+    result.connection = {
+      host: parsed.hostname,
+      port: parsed.port || "5432",
+      database: parsed.pathname.replace("/", ""),
+      user: parsed.username,
+      passwordSet: parsed.password ? `yes (${parsed.password.length} chars)` : "NO PASSWORD",
+      ssl: "will use rejectUnauthorized=false",
+    };
+  } catch {
+    result.connection = "Could not parse DATABASE_URL";
+  }
+
+  result.env = {
+    JWT_SECRET: process.env.JWT_SECRET ? "✅ Set" : "❌ Missing",
+    NODE_ENV: process.env.NODE_ENV,
+    VERCEL: process.env.VERCEL || "not set",
+  };
+
+  // Try connecting directly with pg Pool (bypass drizzle)
+  const isLocal = url.includes("localhost") || url.includes("127.0.0.1");
+  const pool = new Pool({
+    connectionString: url,
+    max: 1,
+    connectionTimeoutMillis: 15000,
+    ssl: isLocal ? false : { rejectUnauthorized: false },
+  });
+
+  try {
+    const client = await pool.connect();
+    const res = await client.query("SELECT 1 as ok");
+    client.release();
+    result.database = "✅ Connected successfully";
+    result.queryResult = res.rows[0];
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    result.database = `❌ Connection FAILED`;
+    result.errorMessage = msg;
+    result.errorType = err instanceof Error ? err.constructor.name : typeof err;
+
+    // Common fixes
+    if (msg.includes("password")) {
+      result.fix = "Password is wrong. Check DATABASE_URL in Vercel env vars.";
+    } else if (msg.includes("ENOTFOUND") || msg.includes("getaddrinfo")) {
+      result.fix = "Host not found. Check the hostname in DATABASE_URL.";
+    } else if (msg.includes("timeout") || msg.includes("ETIMEDOUT")) {
+      result.fix = "Connection timed out. Supabase project may be paused — go to supabase.com and unpause it.";
+    } else if (msg.includes("SSL") || msg.includes("ssl")) {
+      result.fix = "SSL error. Try adding ?sslmode=require to the end of DATABASE_URL.";
+    } else if (msg.includes("ECONNREFUSED")) {
+      result.fix = "Connection refused. Database server is not accepting connections.";
+    } else {
+      result.fix = "Check DATABASE_URL format: postgresql://user:password@host:5432/database";
+    }
+
+    await pool.end().catch(() => {});
+    return NextResponse.json(result, { status: 500 });
+  }
+
+  // Check tables
+  try {
+    const client = await pool.connect();
+    const tables = await client.query(`
       SELECT table_name FROM information_schema.tables
       WHERE table_schema = 'public' ORDER BY table_name
     `);
-    const tableNames = tables.rows.map((r: Record<string, unknown>) => r.table_name as string);
+    client.release();
+    const tableNames = tables.rows.map((r: Record<string, unknown>) => r.table_name);
     result.tables = tableNames;
 
     const required = ["users", "subscriptions", "listings"];
@@ -45,63 +93,39 @@ export async function GET() {
     if (missing.length > 0) {
       result.status = "❌ TABLES MISSING";
       result.missingTables = missing;
-      result.fix = [
-        "Tables don't exist yet in Supabase. Run this on YOUR LOCAL MACHINE:",
-        "",
-        "1. Create file .env.local with:",
-        "   DATABASE_URL=postgresql://postgres:Toluwase2020@db.ktbfrwlxhbufufnaavjc.supabase.co:5432/postgres",
-        "",
-        "2. Run: npx drizzle-kit push",
-        "",
-        "3. Then visit /api/seed to create demo data",
-      ];
-      return NextResponse.json(result, { status: 500 });
+      result.fix = "Go to Supabase SQL Editor and run the SQL from supabase-setup.sql";
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    result.tables = `❌ Failed to check: ${msg}`;
-    return NextResponse.json(result, { status: 500 });
+    result.tables = `❌ Failed: ${msg}`;
   }
 
-  // Step 3: Check data
+  // Check data
   try {
-    const userCount = await db.execute(sql`SELECT COUNT(*)::int as count FROM users`);
-    const listingCount = await db.execute(sql`SELECT COUNT(*)::int as count FROM listings`);
-    const uCount = Number(userCount.rows[0]?.count || 0);
-    const lCount = Number(listingCount.rows[0]?.count || 0);
+    const client = await pool.connect();
+    const users = await client.query("SELECT COUNT(*)::int as count FROM users");
+    const listings = await client.query("SELECT COUNT(*)::int as count FROM listings");
+    client.release();
 
+    const uCount = users.rows[0]?.count || 0;
+    const lCount = listings.rows[0]?.count || 0;
     result.data = { users: uCount, listings: lCount };
 
     if (uCount === 0) {
-      result.status = "⚠️ NO DATA — visit /api/seed to create demo users and listings";
-      return NextResponse.json(result);
+      result.status = result.status || "⚠️ NO DATA";
+      result.nextStep = "Visit /api/seed to create demo data";
+    } else {
+      result.status = result.status || "✅ ALL GOOD";
+      result.login = {
+        url: "/login",
+        admin: { email: "samuel.adesanya1love@gmail.com", password: "admin123" },
+      };
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    result.data = `❌ Failed: ${msg}`;
-    return NextResponse.json(result, { status: 500 });
+    result.data = `❌ ${msg}`;
   }
 
-  // Step 4: Test login ability
-  try {
-    const admin = await db.execute(
-      sql`SELECT id, email, name, role FROM users WHERE email = 'samuel.adesanya1love@gmail.com' LIMIT 1`
-    );
-    if (admin.rows.length > 0) {
-      result.adminAccount = "✅ Found";
-    } else {
-      result.adminAccount = "❌ Not found — visit /api/seed";
-    }
-  } catch {
-    result.adminAccount = "❌ Query failed";
-  }
-
-  result.status = "✅ EVERYTHING READY";
-  result.login = {
-    url: "/login",
-    admin: { email: "samuel.adesanya1love@gmail.com", password: "admin123" },
-    agent: { email: "marie.nguema@gmail.com", password: "agent123" },
-  };
-
+  await pool.end().catch(() => {});
   return NextResponse.json(result);
 }
